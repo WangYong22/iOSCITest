@@ -854,7 +854,7 @@ PL
 		WEB_HOST='vvv.wy2wy.tk'
 		WEB_DIR='/var/www/ios/myapp'
 		WEB_BASE_URL='https://vvv.wy2wy.tk:4433/ios/myapp'
-		BUNDLE_VERSION_FIXED='1.0'
+		
 		
 		# 读取构建阶段导出的 export_path（用于找到本地 IPA 并上传）
 		set +u
@@ -884,7 +884,6 @@ cat >/tmp/_gen_ipa_index.py <<'PY'
 import os, glob, zipfile, plistlib, urllib.parse, html
 
 WEB_BASE_URL = "https://vvv.wy2wy.tk:4433/ios/myapp"
-BUNDLE_VERSION_FIXED = "1.0"
 
 ipas = sorted(glob.glob("*.ipa"), key=os.path.getmtime, reverse=True)
 rows = []
@@ -913,7 +912,7 @@ for ipa in ipas:
                     "assets": [{"kind": "software-package", "url": ipa_url}],
                     "metadata": {
                         "bundle-identifier": bundle_id,
-                        "bundle-version": BUNDLE_VERSION_FIXED,
+                        "bundle-version": ver_build,
                         "kind": "software",
                         "title": app_name,
                     }
