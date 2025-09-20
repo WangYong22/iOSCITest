@@ -154,43 +154,42 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 
             kubectl -n ci apply -f rendered.yaml
           """
-      
-     //下面的内容是排查 Pod 异常   
-     //     sh '''
-     //       kubectl -n ci wait --for=condition=Initialized --timeout=120s pod/macos-build-${BUILD_NODE} || true
+          
+          sh '''
+            kubectl -n ci wait --for=condition=Initialized --timeout=120s pod/macos-build-${BUILD_NODE} || true
 
-     //       kubectl -n ci describe pod macos-build-${BUILD_NODE} | sed -n '/Events:/,$p'
-     //       kubectl -n ci get pod macos-build-${BUILD_NODE} -o wide || true
+            kubectl -n ci describe pod macos-build-${BUILD_NODE} | sed -n '/Events:/,$p'
+            kubectl -n ci get pod macos-build-${BUILD_NODE} -o wide || true
 
-     //      kubectl -n ci get pod macos-build-${BUILD_NODE} -o json \
-     //        | jq '.spec.containers[] | select(.name=="jenkins-bootstrap") | {envFrom: .envFrom, env: .env}' || true
+            kubectl -n ci get pod macos-build-${BUILD_NODE} -o json \
+              | jq '.spec.containers[] | select(.name=="jenkins-bootstrap") | {envFrom: .envFrom, env: .env}' || true
 
-     //       kubectl -n ci get secret jenkins-macos-${BUILD_NODE} -o jsonpath='{.data.JENKINS_URL}' | base64 -d; echo
-     //       kubectl -n ci get secret jenkins-macos-${BUILD_NODE} -o jsonpath='{.data.JENKINS_SECRET}' | base64 -d | awk '{print "LEN=" length}'
+            kubectl -n ci get secret jenkins-macos-${BUILD_NODE} -o jsonpath='{.data.JENKINS_URL}' | base64 -d; echo
+            kubectl -n ci get secret jenkins-macos-${BUILD_NODE} -o jsonpath='{.data.JENKINS_SECRET}' | base64 -d | awk '{print "LEN=" length}'
 
         
-     //     '''
-     //     sh '''
-     //       POD=macos-build-${BUILD_NODE}
+          '''
+          sh '''
+            POD=macos-build-${BUILD_NODE}
 
-     //         # 每个容器的等待原因/信息
-     //       kubectl -n ci get pod "$POD" -o jsonpath='{range .status.containerStatuses[*]}{.name}{" => "}{.state.waiting.reason}{" : "}{.state.waiting.message}{"\n"}{end}' || true
-     //       echo
+            # 每个容器的等待原因/信息
+            kubectl -n ci get pod "$POD" -o jsonpath='{range .status.containerStatuses[*]}{.name}{" => "}{.state.waiting.reason}{" : "}{.state.waiting.message}{"\n"}{end}' || true
+            echo
 
-     //          # 只看 jenkins-bootstrap 的详细等待对象
-     //       kubectl -n ci get pod "$POD" -o json \
-     //          | jq '.status.containerStatuses[] | select(.name=="jenkins-bootstrap")' || true
+            # 只看 jenkins-bootstrap 的详细等待对象
+            kubectl -n ci get pod "$POD" -o json \
+              | jq '.status.containerStatuses[] | select(.name=="jenkins-bootstrap")' || true
 
-     //          # 相关事件（按时间排序）
-     //        kubectl -n ci get events --field-selector involvedObject.name="$POD" --sort-by=.lastTimestamp || true
-     //      '''
-     //      sh '''
-     //        kubectl -n ci get pod macos-build-${BUILD_NODE} -o yaml \
-     //          | sed -n "/containerStatuses:/,/^$/p" || true
-     //      '''
-     //      sh """
-     //        kubectl -n ci get pod macos-build-${BUILD_NODE} -o wide || true
-     //      """
+            # 相关事件（按时间排序）
+            kubectl -n ci get events --field-selector involvedObject.name="$POD" --sort-by=.lastTimestamp || true
+          '''
+          sh '''
+            kubectl -n ci get pod macos-build-${BUILD_NODE} -o yaml \
+              | sed -n "/containerStatuses:/,/^$/p" || true
+          '''
+          sh """
+            kubectl -n ci get pod macos-build-${BUILD_NODE} -o wide || true
+          """
         }
       }
     }
@@ -217,47 +216,24 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 	  agent { label "${env.BUILD_NODE}" }
 	
 	  steps {
-	   withCredentials([
-		  string(credentialsId: 'macos-login-keychain-pass', variable: 'KEYCHAIN_PASS'),
-		  string(credentialsId: 'dist-p12-pass',             variable: 'P12_PASS')
-		])  {
-			  sh '''#!/bin/bash
-			  set -euo pipefail
-			
-			  LOGIN_KC="${HOME}/Library/Keychains/login.keychain-db"
-			  : "${KEYCHAIN_PASS:?missing macos-login-keychain-pass}"
-			  : "${P12_PASS:?missing dist-p12-pass}"
-			
-			  # ========= 在项目根目录自动发现 .p12 =========
-			  cd "$WORKSPACE"
-			  CANDS=( *.p12 )
-			  if [ ! -f "${CANDS[0]}" ]; then
-				echo "[ERR] no .p12 found in project root: $WORKSPACE"
-				exit 2
-			  fi
-			  P12_PATH="${CANDS[0]}"
-			  echo "[P12] picked: $P12_PATH"
-			
-			  # ========= 准备钥匙串 =========
-			  [ -f "$LOGIN_KC" ] || security create-keychain -p "$KEYCHAIN_PASS" "$LOGIN_KC"
-			  security unlock-keychain -p "$KEYCHAIN_PASS" "$LOGIN_KC"
-			  security default-keychain -s "$LOGIN_KC"
-			  security list-keychains -d user -s "$LOGIN_KC"
-			  # 可选：避免很快上锁
-			  # security set-keychain-settings -lut 3600 "$LOGIN_KC"
-			
-			  # ========= 导入 p12 =========
-			  echo "[CERT] import $P12_PATH -> $LOGIN_KC"
-			  security import "$P12_PATH" -k "$LOGIN_KC" -P "$P12_PASS" -A
-			
-			  # 允许 codesign/xcodebuild 无交互访问私钥
-			  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$LOGIN_KC"
-			
-			  echo "[CERT] codesigning identities:"
-			  security find-identity -v -p codesigning || true
-			  '''
-			}
+	    withCredentials([string(credentialsId: 'macos-login-keychain-pass', variable: 'KEYCHAIN_PASS')]) {
+		  sh '''#!/bin/bash
+		  set -euo pipefail
+		  set +u
+		  LOGIN_KC="${HOME}/Library/Keychains/login.keychain-db"
+		  KEYCHAIN_PASS="${KEYCHAIN_PASS:-}"
+		  set -u
 		
+		  : "${KEYCHAIN_PASS:?KEYCHAIN_PASS is empty — configure Jenkins credential 'macos-login-keychain-pass'}"
+		
+		  [ -f "$LOGIN_KC" ] || security create-keychain -p "${KEYCHAIN_PASS}" "$LOGIN_KC"
+		  security unlock-keychain -p "${KEYCHAIN_PASS}" "$LOGIN_KC"
+		  security default-keychain -s "$LOGIN_KC"
+		  security list-keychains -d user -s "$LOGIN_KC"
+		  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASS}" "$LOGIN_KC"
+		  '''
+		}
+	  
 		// 1) 连通性
 		sh '''#!/bin/bash
 		set -euo pipefail
@@ -265,7 +241,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 		sw_vers
 		'''
 	
-	    // 2) 拉取 provisioning profile（用 Jenkins 中 ID=137ssh 的私钥）
+		// 2) 拉取 provisioning profile（用 Jenkins 中 ID=137ssh 的私钥）
 		
 		sh '''#!/bin/bash
 		set -euo pipefail
@@ -376,29 +352,14 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 		echo "[PP] Platform[0]=$PLATFORM0"
 		
 		# 判定证书类型与目的平台
-                  # 读取可选键
-		  PROVISIONS_ALL=$(/usr/libexec/PlistBuddy -c 'Print :ProvisionsAllDevices' "$PLIST" 2>/dev/null || echo "false")
-		  if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$PLIST" >/dev/null 2>&1; then
-		    HAS_DEVICES=true
-		  else
-		    HAS_DEVICES=false
-		  fi
-
-		  # 判定导出 method 与证书类型
-		  if [ "$GET_TASK_ALLOW" = "true" ]; then
-		    METHOD="development"
-		  else
-		    if [ "$PROVISIONS_ALL" = "true" ]; then
-		      METHOD="enterprise"
- 		    elif $HAS_DEVICES; then
- 		      METHOD="ad-hoc"
- 		    else
- 		      METHOD="app-store"
-  		    fi	 
-		  fi
+		if [ "$GET_TASK_ALLOW" = "true" ]; then
+		  PROFILE_KIND="debugging"
+		  CERT_KIND="Apple Development"
+		else
+		  PROFILE_KIND="distribution"
+		  CERT_KIND="Apple Distribution"
+		fi
 		
-		
-
 		# —— 不再在这里直接设置 DESTINATION；只做平台“提示” —— 
 		case "$(printf '%s' "${PLATFORM0:-}" | tr '[:upper:]' '[:lower:]')" in
 		  visionos|xros) DESTINATION_HINT="generic/platform=visionOS" ;;
@@ -407,7 +368,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 		  *)             DESTINATION_HINT="" ;;
 		esac
 		
-		echo "[PP] kind=$METHOD  platform_hint=${DESTINATION_HINT:-none}"
+		echo "[PP] kind=$PROFILE_KIND  platform_hint=${DESTINATION_HINT:-none}  cert=$CERT_KIND"
 		
 		# 安装 profile
 		DEST_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
@@ -415,7 +376,57 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 		install -m 0644 "$PROFILE" "$DEST_DIR/${UUID}.mobileprovision"
 		echo "[INSTALL] $DEST_DIR/${UUID}.mobileprovision"
 		
+		# 选择匹配证书（需要你已导入带私钥证书并解锁 login 钥匙串）
+		echo "[CHK] E: pick signing identity (robust matcher)"
+
+		# 可选：显式指定证书可读名称（最可靠）
+		# export CERT_CN='Apple Development: Yong Wang (LFBT5QQQ6J)'
 		
+		ALL_IDS="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+		echo "[DBG] identities raw:"
+		printf '%s\n' "$ALL_IDS" | sed -e 's/^/  /'
+		
+		pick_by_cn() {
+		  # 精确用证书可读名称匹配（CN）
+		  printf '%s\n' "$ALL_IDS" | awk -v cn="$CERT_CN" -F'"' '$0 ~ cn {print $2; exit}'
+		}
+		
+		pick_by_kind_team() {
+		  # 同时匹配证书类型 + (TEAMID) —— 某些系统输出里没有(TEAMID)，可能匹配不到
+		  printf '%s\n' "$ALL_IDS" | awk -v k="$CERT_KIND" -v t="$TEAMID" -F'"' \
+			  'index($0,k) && index($0,"(" t ")") {print $2; exit}'
+		}
+		
+		pick_by_kind_only() {
+		  # 只匹配证书类型（如 Apple Development），取第一张
+		  printf '%s\n' "$ALL_IDS" | awk -v k="$CERT_KIND" -F'"' \
+			  'index($0,k) {print $2; exit}'
+		}
+		
+		CODE_SIGN_IDENTITY=""
+		
+		if [ -n "${CERT_CN:-}" ]; then
+		  CODE_SIGN_IDENTITY="$(pick_by_cn)"
+		  echo "[DBG] pick_by_cn => ${CODE_SIGN_IDENTITY:-<empty>}"
+		fi
+		
+		if [ -z "$CODE_SIGN_IDENTITY" ]; then
+		  CODE_SIGN_IDENTITY="$(pick_by_kind_team)"
+		  echo "[DBG] pick_by_kind_team => ${CODE_SIGN_IDENTITY:-<empty>}"
+		fi
+		
+		if [ -z "$CODE_SIGN_IDENTITY" ]; then
+		  CODE_SIGN_IDENTITY="$(pick_by_kind_only)"
+		  echo "[DBG] pick_by_kind_only => ${CODE_SIGN_IDENTITY:-<empty>}"
+		fi
+		
+		if [ -z "$CODE_SIGN_IDENTITY" ]; then
+		  echo "[ERR] 仍然找不到匹配证书（kind=$CERT_KIND, team=$TEAMID）。"
+		  echo "      你可以显式指定： export CERT_CN='Apple Development: Yong Wang (LFBT5QQQ6J)'"
+		  exit 1
+		fi
+		
+		echo "[CERT] picked: $CODE_SIGN_IDENTITY"
 		
 		
 		# ====== 自动探测 Xcode 工程 / Scheme / Configuration ======
@@ -618,11 +629,11 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 		
 		# —— 写回 BuildVariable，供 post 阶段读取 ----
         cat > BuildVariable <<EOF
-	    	project_scheme=${project_scheme}
-			export_path=${export_path}
-			build_dir=${build_dir}
-			archive_path=${archive_path}
-			exportOptionsPlist=${exportOptionsPlist}
+project_scheme=${project_scheme}
+export_path=${export_path}
+build_dir=${build_dir}
+archive_path=${archive_path}
+exportOptionsPlist=${exportOptionsPlist}
 EOF
 
 		echo "==[DEBUG] wrote BuildVariable =="
@@ -637,7 +648,8 @@ EOF
 		<plist version="1.0"><dict>
 		  <key>signingStyle</key><string>manual</string>
 		  <key>teamID</key><string>${TEAMID}</string>      
-		  <key>method</key><string>${METHOD}</string>
+		  <key>method</key><string>${PROFILE_KIND}</string>
+		  <key>signingCertificate</key><string>${CERT_KIND}</string>
 		  <key>provisioningProfiles</key><dict>
 			<key>${BUNDLEID}</key><string>${CPROVISIONING_PROFILE_NAME}</string>
 		  </dict>
@@ -668,15 +680,14 @@ PL
 		  clean archive \
 		  -archivePath "$archive_path" \
 		  -destination "$DESTINATION" \
-		  CODE_SIGN_STYLE=Manual \
-		  DEVELOPMENT_TEAM="$TEAMID" \
+		  DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
 		  CODE_SIGNING_ALLOWED=NO \
-		 # CODE_SIGN_IDENTITY="Apple Distribution" \
-		  PRODUCT_BUNDLE_IDENTIFIER="$BUNDLEID" \
-		  PROVISIONING_PROFILE_SPECIFIER="$CPROVISIONING_PROFILE_NAME" \
-		#  -allowProvisioningUpdates \
-		#  -allowProvisioningDeviceRegistration \
-		#  -UseModernBuildSystem=NO \
+		 # CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
+		 # PRODUCT_BUNDLE_IDENTIFIER="$BUNDLEID" \
+		 # PROVISIONING_PROFILE_SPECIFIER="$CPROVISIONING_PROFILE_NAME" \
+		  -allowProvisioningUpdates \
+		  -allowProvisioningDeviceRegistration \
+		  -UseModernBuildSystem=NO \
 		  -quiet		
 		
 		
@@ -830,9 +841,9 @@ PL
 		'''
 		}
 	  }
-			  
-			  
-			  
+
+
+
 	    // === 紧接着在同一节点上发布到 Web ===
    	 withCredentials([sshUserPrivateKey(credentialsId: 'websshkey',
                                        keyFileVariable: 'SSH_KEY',
@@ -843,7 +854,7 @@ PL
 		WEB_HOST='vvv.wy2wy.tk'
 		WEB_DIR='/var/www/ios/myapp'
 		WEB_BASE_URL='https://vvv.wy2wy.tk:4433/ios/myapp'
-		BUNDLE_VERSION_FIXED='1.0'
+		
 		
 		# 读取构建阶段导出的 export_path（用于找到本地 IPA 并上传）
 		set +u
@@ -873,7 +884,6 @@ cat >/tmp/_gen_ipa_index.py <<'PY'
 import os, glob, zipfile, plistlib, urllib.parse, html
 
 WEB_BASE_URL = "https://vvv.wy2wy.tk:4433/ios/myapp"
-BUNDLE_VERSION_FIXED = "1.0"
 
 ipas = sorted(glob.glob("*.ipa"), key=os.path.getmtime, reverse=True)
 rows = []
@@ -902,7 +912,7 @@ for ipa in ipas:
                     "assets": [{"kind": "software-package", "url": ipa_url}],
                     "metadata": {
                         "bundle-identifier": bundle_id,
-                        "bundle-version": BUNDLE_VERSION_FIXED,
+                        "bundle-version": ver_build,
                         "kind": "software",
                         "title": app_name,
                     }
@@ -963,8 +973,6 @@ REMOTE
  }
 
   
-	
-    
   
   
   post {
@@ -1003,7 +1011,7 @@ REMOTE
 				} else {
 				  println "NOT_FOUND " + name
 				}
-
+G
 				
 				curl -fsS -u "\$JAUTH" -H "Jenkins-Crumb: \$CRUMB" \
 				  --data-urlencode script@.cleanup.groovy \
