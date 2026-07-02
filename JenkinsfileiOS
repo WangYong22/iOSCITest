@@ -840,7 +840,7 @@ PL
 		sh '''#!/bin/bash
 		set -euo pipefail
 		
-		WEB_HOST='vvv.wy2wy.tk'
+		WEB_HOST='45.77.155.247'
 		WEB_DIR='/var/www/ios/myapp'
 		WEB_BASE_URL='https://vvv.wy2wy.tk:4433/ios/myapp'
 		BUNDLE_VERSION_FIXED='1.0'
