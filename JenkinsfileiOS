@@ -139,7 +139,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 
 
 
-    stage('Launch VM Pod') {
+    stage('Launch VM Pod') {    stage('Launch VM Pod') {
       agent { label 'macmain' }   // <- 这里是装了 kubectl 的 Mac节点
       steps {
         sh 'cp /Users/mdsadmin/jenkins_home/pod-templates/macos-pod.yaml .'
@@ -183,41 +183,54 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
             def SECRET  = readFile('.jnlp.secret').trim()
             def JURL    = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
 
-            // 生成宿主机执行脚本（注意：Groovy 里的每个 $ 如果不是插值必须写成 \$）
-            writeFile file: '.launch_agent.sh', text: """#!/bin/bash
+            // 生成宿主机执行脚本：通过传参方式，内部绝无 Groovy 语法冲突字符
+            sh """#!/bin/bash
+cat > .launch_agent.sh << 'EOF'
+#!/bin/bash
 set -euo pipefail
 
-echo "[WAIT] 等待虚拟机 SSH 就绪 (${VM_IP}:22)..."
+TARGET_VM="\$1"
+JENKINS_BASE_URL="\$2"
+AGENT_NAME="\$3"
+AGENT_SECRET="\$4"
+
+echo "[WAIT] 等待虚拟机 SSH 就绪 (\${TARGET_VM}:22)..."
 for i in \$(seq 1 45); do
-  if nc -z -w 1 "${VM_IP}" 22 2>/dev/null; then
+  if nc -z -w 1 "\${TARGET_VM}" 22 2>/dev/null; then
     echo "[INFO] 虚拟机 SSH 已经就绪！"
     break
   fi
   sleep 2
 done
 
-echo "[START] 启动 Jenkins Agent (${BUILD_NODE})..."
-/usr/bin/expect - << 'EXPEOF'
+echo "[START] 启动 Jenkins Agent (\${AGENT_NAME})..."
+/usr/bin/expect - "\${TARGET_VM}" "\${JENKINS_BASE_URL}" "\${AGENT_NAME}" "\${AGENT_SECRET}" << 'EXPEOF'
 set timeout 30
-spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP}
+set vm [lindex \$argv 0]
+set jurl [lindex \$argv 1]
+set name [lindex \$argv 2]
+set secret [lindex \$argv 3]
+
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@\$vm
 expect {
     "Password:" { send "test\r" }
     "password:" { send "test\r" }
     timeout { exit 1 }
     eof { exit 1 }
 }
-expect -re ".*(>|%|#|\\$) *"
-send "mkdir -p ~/jenkins-agent && curl -fsSL ${JURL}/jnlpJars/agent.jar -o ~/jenkins-agent/agent.jar\r"
-expect -re ".*(>|%|#|\\$) *"
-send "nohup /usr/bin/java -jar ~/jenkins-agent/agent.jar -url ${JURL} -name ${BUILD_NODE} -secret ${SECRET} -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &\r"
-expect -re ".*(>|%|#|\\$) *"
+expect "% "
+send "mkdir -p ~/jenkins-agent && curl -fsSL \$jurl/jnlpJars/agent.jar -o ~/jenkins-agent/agent.jar\r"
+expect "% "
+send "nohup /usr/bin/java -jar ~/jenkins-agent/agent.jar -url \$jurl -name \$name -secret \$secret -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &\r"
+expect "% "
 send "exit\r"
 expect eof
 EXPEOF
 echo "[DONE] Agent 启动指令下发完成！"
-""".stripIndent()
+EOF
+"""
 
-            withEnv(["TARGET_HOST=${HOST_IP}"]) {
+            withEnv(["TARGET_HOST=${HOST_IP}", "T_VM=${VM_IP}", "T_URL=${JURL}", "T_NAME=${BUILD_NODE}", "T_SECRET=${SECRET}"]) {
               sh '''#!/bin/bash
                 set -euo pipefail
                 
@@ -227,7 +240,7 @@ echo "[DONE] Agent 启动指令下发完成！"
                 scp "${SSH_OPTS[@]}" .launch_agent.sh "$SSH_USER@${TARGET_HOST}:/tmp/.launch_agent.sh"
                 
                 echo "[EXEC] 在 ${TARGET_HOST} 上执行启动脚本..."
-                ssh "${SSH_OPTS[@]}" "$SSH_USER@${TARGET_HOST}" "bash /tmp/.launch_agent.sh && rm -f /tmp/.launch_agent.sh"
+                ssh "${SSH_OPTS[@]}" "$SSH_USER@${TARGET_HOST}" "bash /tmp/.launch_agent.sh '$T_VM' '$T_URL' '$T_NAME' '$T_SECRET' && rm -f /tmp/.launch_agent.sh"
                 
                 echo "[DONE] 节点启动指令执行完毕！"
               '''
