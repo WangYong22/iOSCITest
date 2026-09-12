@@ -183,7 +183,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
             def SECRET  = readFile('.jnlp.secret').trim()
             def JURL    = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
 
-            // 生成一段在宿主机执行的启动脚本，彻底避免多层单双引号转义冲突
+            // 生成一段在宿主机执行的启动脚本
             writeFile file: '.launch_agent.sh', text: """#!/bin/bash
 set -euo pipefail
 
@@ -197,7 +197,6 @@ for i in \$(seq 1 45); do
 done
 
 echo "[START] 启动 Jenkins Agent (${BUILD_NODE})..."
-# 用 Python pexpect 免交互输入密码 test 启动 Agent
 python3 - << 'PYEOF'
 import pexpect, sys
 
@@ -219,19 +218,27 @@ else:
 PYEOF
 """.stripIndent()
 
-            // 将该脚本推送到宿主机执行
-            sh """#!/bin/bash
-              set -euo pipefail
-              SSH_OPTS="-i '$SSH_KEY' -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-              
-              # 上传并执行启动脚本
-              scp \$SSH_OPTS .launch_agent.sh "$SSH_USER@${HOST_IP}:/tmp/.launch_agent.sh"
-              ssh \$SSH_OPTS "$SSH_USER@${HOST_IP}" "bash /tmp/.launch_agent.sh && rm -f /tmp/.launch_agent.sh"
-              echo "[DONE] 节点 ${BUILD_NODE} 启动指令已成功注入！"
-            """
+            // ✅ 核心修复：把 HOST_IP 通过环境变量传给 shell，使用原生的 "$SSH_KEY" 和 "$SSH_USER"
+            withEnv(["TARGET_HOST=${HOST_IP}"]) {
+              sh '''#!/bin/bash
+                set -euo pipefail
+                
+                # 检查密钥文件是否存在
+                [ -f "$SSH_KEY" ] || { echo "[ERR] SSH_KEY 文件不存在: $SSH_KEY"; exit 1; }
+
+                SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+                
+                echo "[SCP] 上传启动脚本到 ${TARGET_HOST}..."
+                scp "${SSH_OPTS[@]}" .launch_agent.sh "$SSH_USER@${TARGET_HOST}:/tmp/.launch_agent.sh"
+                
+                echo "[EXEC] 在 ${TARGET_HOST} 上执行启动脚本..."
+                ssh "${SSH_OPTS[@]}" "$SSH_USER@${TARGET_HOST}" "bash /tmp/.launch_agent.sh && rm -f /tmp/.launch_agent.sh"
+                
+                echo "[DONE] 节点启动指令执行完毕！"
+              '''
+            }
           }
         }
-      }
     }
   
   
