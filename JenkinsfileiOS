@@ -137,6 +137,8 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
       }
     }
 
+
+
     stage('Launch VM Pod') {
       agent { label 'macmain' }   // <- 这里是装了 kubectl 的 Mac节点
       steps {
@@ -150,84 +152,89 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 
             kubectl -n ci apply -f rendered.yaml
 
-            # 1. 自动等待 Pod 就绪并提取真实分配的 VM IP (无论是 .2, .3 还是 .5)
-            echo "[WAIT] 等待 Pod 获取动态 IP..."
+            # 1. 动态获取本次 Pod 所在的宿主机 IP 和 VM 内部 IP（完全自适应任何 Mac 节点）
+            echo "[WAIT] 等待 Pod 分配宿主机与动态 IP..."
             VM_IP=""
+            HOST_IP=""
             for i in \$(seq 1 30); do
               VM_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.podIP}' 2>/dev/null || true)
-              if [ -n "\$VM_IP" ]; then
-                echo "[INFO] 成功获取 VM 动态 IP: \$VM_IP"
+              HOST_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.hostIP}' 2>/dev/null || true)
+              if [ -n "\$VM_IP" ] && [ -n "\$HOST_IP" ]; then
+                echo "[INFO] 调度成功! 宿主机 Node IP: \$HOST_IP, 虚拟机 VM IP: \$VM_IP"
                 break
               fi
               sleep 2
             done
             [ -n "\$VM_IP" ] || { echo "[ERR] 获取 VM IP 超时"; exit 1; }
-            echo "\$VM_IP" > .vm_ip.txt
+            [ -n "\$HOST_IP" ] || { echo "[ERR] 获取宿主机 IP 超时"; exit 1; }
+
+            echo "\$VM_IP"   > .vm_ip.txt
+            echo "\$HOST_IP" > .host_ip.txt
           """
         }
 
-        // 2. 通过 139 宿主机，或者直接向 VM 注入 Agent 启动命令
+        // 2. 动态登录对应的 Mac 宿主机，拉起对应 VM 里的 Agent
         withCredentials([sshUserPrivateKey(credentialsId: '137ssh',
                                            keyFileVariable: 'SSH_KEY',
                                            usernameVariable: 'SSH_USER')]) {
           script {
-            def VM_IP = readFile('.vm_ip.txt').trim()
+            def VM_IP   = readFile('.vm_ip.txt').trim()
             def HOST_IP = readFile('.host_ip.txt').trim()
-            def SECRET = readFile('.jnlp.secret').trim()
-            def JURL = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
+            def SECRET  = readFile('.jnlp.secret').trim()
+            def JURL    = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
 
-            sh """#!/bin/bash
-              set -euo pipefail
-              
-             
-             # ✅ 动态指向当前 Pod 所在的宿主机（绝无硬编码）
-              SSH_NODE="ssh -i '$SSH_KEY' -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '$SSH_USER@${HOST_IP}'"
+            // 生成一段在宿主机执行的启动脚本，彻底避免多层单双引号转义冲突
+            writeFile file: '.launch_agent.sh', text: """#!/bin/bash
+set -euo pipefail
 
-              # 1. 检测对应宿主机上的虚拟机 22 端口就绪
-              echo "[WAIT] 等待宿主机 (${HOST_IP}) 上的虚拟机 SSH 端口就绪 (${VM_IP}:22)..."
-              for i in \$(seq 1 45); do
-                if \$SSH_NODE "nc -z -w 1 ${VM_IP} 22" 2>/dev/null; then
-                  echo "[INFO] 虚拟机 SSH 已经就绪！"
-                  break
-                fi
-                sleep 2
-              done
+echo "[WAIT] 等待虚拟机 SSH 就绪 (${VM_IP}:22)..."
+for i in \$(seq 1 45); do
+  if nc -z -w 1 "${VM_IP}" 22 2>/dev/null; then
+    echo "[INFO] 虚拟机 SSH 已经就绪！"
+    break
+  fi
+  sleep 2
+done
 
-              # 2. 登录该虚拟机拉起 Jenkins Agent
-              echo "[START] 在宿主机 (${HOST_IP}) 上拉起虚拟机 (${VM_IP}) 的 Jenkins Agent..."
-              \$SSH_NODE 'python3 -c "
+echo "[START] 启动 Jenkins Agent (${BUILD_NODE})..."
+# 用 Python pexpect 免交互输入密码 test 启动 Agent
+python3 - << 'PYEOF'
 import pexpect, sys
-child = pexpect.spawn(\"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP}\", timeout=30)
-idx = child.expect([\"Password:\", \"password:\", pexpect.EOF, pexpect.TIMEOUT])
+
+cmd = 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP}'
+child = pexpect.spawn(cmd, timeout=30)
+idx = child.expect(['Password:', 'password:', pexpect.EOF, pexpect.TIMEOUT])
 if idx in [0, 1]:
-    child.sendline(\"test\")
-    child.expect([\"% \", \"$ \", \"# \"])
-    child.sendline(\"mkdir -p ~/jenkins-agent && curl -fsSL ${JURL}/jnlpJars/agent.jar -o ~/jenkins-agent/agent.jar\")
-    child.expect([\"% \", \"$ \", \"# \"])
-    child.sendline(\"nohup /usr/bin/java -jar ~/jenkins-agent/agent.jar -url ${JURL} -name ${BUILD_NODE} -secret ${SECRET} -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &\")
-    child.expect([\"% \", \"$ \", \"# \"])
-    child.sendline(\"exit\")
+    child.sendline('test')
+    child.expect(['% ', '\$ ', '# '])
+    child.sendline('mkdir -p ~/jenkins-agent && curl -fsSL ${JURL}/jnlpJars/agent.jar -o ~/jenkins-agent/agent.jar')
+    child.expect(['% ', '\$ ', '# '])
+    child.sendline('nohup /usr/bin/java -jar ~/jenkins-agent/agent.jar -url ${JURL} -name ${BUILD_NODE} -secret ${SECRET} -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &')
+    child.expect(['% ', '\$ ', '# '])
+    child.sendline('exit')
     child.expect(pexpect.EOF)
-    print(\"AGENT_LAUNCHED_SUCCESSFULLY\")
+    print("AGENT_LAUNCHED_SUCCESSFULLY")
 else:
     sys.exit(1)
-" 2>/dev/null || (
-  # 兼容方案：若无 pexpect 则尝试 sshpass
-  sshpass -p test ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP} "
-    mkdir -p \\\$HOME/jenkins-agent
-    curl -fsSL \\"${JURL}/jnlpJars/agent.jar\\" -o \\\$HOME/jenkins-agent/agent.jar
-    nohup /usr/bin/java -jar \\\$HOME/jenkins-agent/agent.jar \\
-      -url \\"${JURL}\\" \\
-      -name \\"${BUILD_NODE}\\" \\
-      -secret \\"${SECRET}\\" \\
-      -workDir \\\$HOME/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &
-  "
-)'
+PYEOF
+""".stripIndent()
+
+            // 将该脚本推送到宿主机执行
+            sh """#!/bin/bash
+              set -euo pipefail
+              SSH_OPTS="-i '$SSH_KEY' -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+              
+              # 上传并执行启动脚本
+              scp \$SSH_OPTS .launch_agent.sh "$SSH_USER@${HOST_IP}:/tmp/.launch_agent.sh"
+              ssh \$SSH_OPTS "$SSH_USER@${HOST_IP}" "bash /tmp/.launch_agent.sh && rm -f /tmp/.launch_agent.sh"
               echo "[DONE] 节点 ${BUILD_NODE} 启动指令已成功注入！"
             """
           }
+        }
       }
     }
+  
+  
   
 	stage('Cred debug: ssh private key (137ssh)') {
 	  agent { label 'macmain' }   // <- 这里是装了 kubectl 的 Mac节点
