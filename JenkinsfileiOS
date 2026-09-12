@@ -197,25 +197,24 @@ for i in \$(seq 1 45); do
 done
 
 echo "[START] 启动 Jenkins Agent (${BUILD_NODE})..."
-python3 - << 'PYEOF'
-import pexpect, sys
-
-cmd = 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP}'
-child = pexpect.spawn(cmd, timeout=30)
-idx = child.expect(['Password:', 'password:', pexpect.EOF, pexpect.TIMEOUT])
-if idx in [0, 1]:
-    child.sendline('test')
-    child.expect(['% ', '\$ ', '# '])
-    child.sendline('mkdir -p ~/jenkins-agent && curl -fsSL ${JURL}/jnlpJars/agent.jar -o ~/jenkins-agent/agent.jar')
-    child.expect(['% ', '\$ ', '# '])
-    child.sendline('nohup /usr/bin/java -jar ~/jenkins-agent/agent.jar -url ${JURL} -name ${BUILD_NODE} -secret ${SECRET} -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &')
-    child.expect(['% ', '\$ ', '# '])
-    child.sendline('exit')
-    child.expect(pexpect.EOF)
-    print("AGENT_LAUNCHED_SUCCESSFULLY")
-else:
-    sys.exit(1)
-PYEOF
+/usr/bin/expect << 'EXPEOF'
+set timeout 30
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP}
+expect {
+    "Password:" { send "test\r" }
+    "password:" { send "test\r" }
+    timeout { puts "SSH_TIMEOUT"; exit 1 }
+    eof { puts "SSH_EOF"; exit 1 }
+}
+expect -re {[%$#] }
+send "mkdir -p ~/jenkins-agent && curl -fsSL ${JURL}/jnlpJars/agent.jar -o ~/jenkins-agent/agent.jar\r"
+expect -re {[%$#] }
+send "nohup /usr/bin/java -jar ~/jenkins-agent/agent.jar -url ${JURL} -name ${BUILD_NODE} -secret ${SECRET} -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &\r"
+expect -re {[%$#] }
+send "exit\r"
+expect eof
+puts "AGENT_LAUNCHED_SUCCESSFULLY"
+EXPEOF
 """.stripIndent()
 
             // ✅ 核心修复：把 HOST_IP 通过环境变量传给 shell，使用原生的 "$SSH_KEY" 和 "$SSH_USER"
