@@ -139,7 +139,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
     
     
     stage('Launch VM Pod') {
-      agent { label 'macmain' }   
+      agent { label 'macmain' }
       steps {
         sh 'cp /Users/mdsadmin/jenkins_home/pod-templates/macos-pod.yaml .'
         
@@ -152,92 +152,90 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
                 -e "s/__VZ_USER__/test/g" \
                 -e "s/__VZ_PASS__/test/g" macos-pod.yaml > rendered.yaml
 
-            # 直接应用替换好的 YAML
             kubectl -n ci apply -f rendered.yaml
 
             echo "=========================================="
-            echo "[WAIT] 等待 K8s 分配虚拟机 IP..."
+            echo "[WAIT] 等待 K8s 分配虚拟机 IP 和宿主机 IP..."
             VM_IP=""
+            HOST_IP=""
             for i in \$(seq 1 30); do
               VM_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.podIP}' 2>/dev/null || true)
-              if [ -n "\$VM_IP" ]; then
-                echo "[INFO] 虚拟机 IP 获取成功: \$VM_IP"
+              HOST_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.hostIP}' 2>/dev/null || true)
+              if [ -n "\$VM_IP" ] && [ -n "\$HOST_IP" ]; then
+                echo "[INFO] 成功获取 VM_IP: \$VM_IP, 宿主机 IP: \$HOST_IP"
                 break
               fi
               sleep 2
             done
-            [ -n "\$VM_IP" ] || { echo "[ERR] 获取 VM IP 超时"; exit 1; }
+            [ -n "\$VM_IP" ] || { echo "[ERR] 获取 VM/HOST IP 超时"; exit 1; }
             echo "\$VM_IP" > .vm_ip.txt
+            echo "\$HOST_IP" > .host_ip.txt
           """
         }
 
-               // ====== Jenkins 亲自连进虚拟机拉起 Agent，带进度条和防超时 ======
-        script {
-          def VM_IP = readFile('.vm_ip.txt').trim()
-          def SECRET = readFile('.jnlp.secret').trim()
-          def JURL = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
+        // ================= 使用 137ssh 密钥，通过宿主机跳板连接虚拟机 =================
+        withCredentials([sshUserPrivateKey(credentialsId: '137ssh', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+          script {
+            def VM_IP = readFile('.vm_ip.txt').trim()
+            def HOST_IP = readFile('.host_ip.txt').trim()
+            def SECRET = readFile('.jnlp.secret').trim()
+            def JURL = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
 
-          sh """#!/bin/bash
-            set -euo pipefail
+            sh """#!/bin/bash
+              set -euo pipefail
+              
+              echo "=========================================="
+              echo "[JUMP] Jenkins 准备通过宿主机 (\$HOST_IP) 跳板连接虚拟机 (\$VM_IP)..."
+              SSH_NODE="ssh -i '\$SSH_KEY' -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '\$SSH_USER@\${HOST_IP}'"
 
-            echo "=========================================="
-            echo "[WAIT] 正在等待 macOS 虚拟机开机并启动 SSH 服务 (${VM_IP}:22)..."
-            echo "提示: macOS 虚拟机冷启动通常需要 1 到 3 分钟，请耐心等待。"
-            
-            SSH_READY=0
-            for i in \$(seq 1 60); do
-              if nc -z -w 1 "${VM_IP}" 22 2>/dev/null; then
-                SSH_READY=1
-                echo ""
-                echo "[INFO] SSH 端口已开放！开机完成。"
-                break
+              echo "[WAIT] 从宿主机探测虚拟机 SSH 端口 (\${VM_IP}:22)..."
+              SSH_READY=0
+              for i in \$(seq 1 45); do
+                # 关键：这句探测命令是在 HOST_IP 身上执行的，绕过了网络隔离
+                if \$SSH_NODE "nc -z -w 1 \${VM_IP} 22" 2>/dev/null; then
+                  SSH_READY=1
+                  echo "[INFO] SSH 端口已开放！虚拟机启动完成。"
+                  break
+                fi
+                sleep 3
+              done
+
+              if [ "\$SSH_READY" -eq 0 ]; then
+                echo "[ERR] 等待虚拟机 SSH 超时！"
+                exit 1
               fi
-              # 打印小圆点代表正在等待
-              printf "."
-              sleep 3
-            done
 
-            if [ "\$SSH_READY" -eq 0 ]; then
-              echo ""
-              echo "[ERR] 等待超过 3 分钟，虚拟机 SSH 仍未启动，判定为失败！"
-              exit 1
-            fi
-
-            echo "=========================================="
-            echo "[START] 通过 SSH 登录虚拟机并启动 Jenkins Agent..."
-            
-            # 加入 ConnectTimeout=10，防止意外挂起
-            sshpass -p 'test' ssh -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 test@${VM_IP} << 'REMOTE'
-              set -ex
+              echo "[START] 通过宿主机注入 Python 脚本，登录虚拟机启动 Agent..."
               
-              echo "1. 创建工作目录"
-              mkdir -p ~/jenkins-agent
-              
-              echo "2. 下载 Jenkins Agent.jar"
-              curl -fSL -v "${JURL}/jnlpJars/agent.jar" -o ~/jenkins-agent/agent.jar
-              
-              echo "3. 定位 Java 路径"
-              JAVA_PATH=\$(which java || echo "/opt/homebrew/opt/openjdk/bin/java")
-              echo "使用 Java 路径: \$JAVA_PATH"
-              \$JAVA_PATH -version
-              
-              echo "4. 生成启动脚本"
-              cat > ~/jenkins-agent/run.sh << 'SH'
-#!/bin/zsh
-exec \$JAVA_PATH -jar "\$HOME/jenkins-agent/agent.jar" \\
-  -url "${JURL}" -name "${BUILD_NODE}" -secret "${SECRET}" \\
-  -workDir "\$HOME/jenkins-agent" -webSocket
-SH
-              chmod +x ~/jenkins-agent/run.sh
-              
-              echo "5. 后台启动 Agent"
-              nohup ~/jenkins-agent/run.sh > /tmp/agent.out 2>&1 &
-              
-              echo "Agent 启动指令发送完毕！"
-REMOTE
-
-            echo "[DONE] 恭喜！节点 ${BUILD_NODE} 启动指令注入完成！"
-          """
+              # 恢复你原来的 pexpect 脚本，但使用了最正确的 Java 路径
+              \$SSH_NODE 'python3 -c "
+import pexpect, sys
+print(\\"[1] Login into VM...\\")
+child = pexpect.spawn(\\"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@'${VM_IP}'\\", timeout=30)
+idx = child.expect([\\"Password:\\", \\"password:\\", pexpect.EOF, pexpect.TIMEOUT])
+if idx in [0, 1]:
+    child.sendline(\\"test\\")
+    child.expect([\\"% \\", \\"$ \\", \\"# \\"])
+    
+    print(\\"[2] Downloading agent.jar...\\")
+    child.sendline(\\"mkdir -p ~/jenkins-agent && curl -fSL '${JURL}/jnlpJars/agent.jar' -o ~/jenkins-agent/agent.jar\\")
+    child.expect([\\"% \\", \\"$ \\", \\"# \\"])
+    
+    print(\\"[3] Starting Agent...\\")
+    # 核心修复点：这里使用了你虚拟机真实的 java 路径
+    child.sendline(\\"nohup /opt/homebrew/opt/openjdk/bin/java -jar ~/jenkins-agent/agent.jar -url '${JURL}' -name '${BUILD_NODE}' -secret '${SECRET}' -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &\\")
+    child.expect([\\"% \\", \\"$ \\", \\"# \\"])
+    
+    child.sendline(\\"exit\\")
+    child.expect(pexpect.EOF)
+    print(\\"[DONE] Agent successfully launched in VM!\\")
+else:
+    print(\\"[ERR] SSH Login failed\\")
+    sys.exit(1)
+"'
+              echo "[SUCCESS] 节点 ${BUILD_NODE} 启动指令已成功完成跳板注入！"
+            """
+          }
         }
       }
     }
