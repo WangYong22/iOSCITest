@@ -148,62 +148,13 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
                 -e "s/__VZ_USER__/test/g" \
                 -e "s/__VZ_PASS__/test/g" macos-pod.yaml > rendered.yaml
 
+            echo '===== rendered.yaml (compute env) ====='
+            awk '/name: compute/{f=1} f{print} /name: jenkins-bootstrap/{f=0}' rendered.yaml
+            echo '======================================'
+
             kubectl -n ci apply -f rendered.yaml
-
-            # 1. 自动等待 Pod 就绪并提取真实分配的 VM IP (无论是 .2, .3 还是 .5)
-            echo "[WAIT] 等待 Pod 获取动态 IP..."
-            VM_IP=""
-            for i in \$(seq 1 30); do
-              VM_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.podIP}' 2>/dev/null || true)
-              if [ -n "\$VM_IP" ]; then
-                echo "[INFO] 成功获取 VM 动态 IP: \$VM_IP"
-                break
-              fi
-              sleep 2
-            done
-            [ -n "\$VM_IP" ] || { echo "[ERR] 获取 VM IP 超时"; exit 1; }
-            echo "\$VM_IP" > .vm_ip.txt
           """
-        }
-
-        // 2. 通过 139 宿主机，或者直接向 VM 注入 Agent 启动命令
-        withCredentials([sshUserPrivateKey(credentialsId: '137ssh',
-                                           keyFileVariable: 'SSH_KEY',
-                                           usernameVariable: 'SSH_USER')]) {
-          script {
-            def VM_IP = readFile('.vm_ip.txt').trim()
-            def JURL = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
-
-            sh """#!/bin/bash
-              set -euo pipefail
-              
-              # 通过 139 宿主机作为跳板，或者直连 VM 22 端口检测就绪
-              echo "[WAIT] 等待虚拟机 SSH 端口就绪 (${VM_IP}:22)..."
-              for i in \$(seq 1 45); do
-                if ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@17.87.2.139" "nc -z -w 1 ${VM_IP} 22" 2>/dev/null; then
-                  echo "[INFO] 虚拟机 SSH 已经就绪！"
-                  break
-                fi
-                sleep 2
-              done
-
-              # 直接将 agent 注入进该虚拟机并启动
-              echo "[START] 启动 Jenkins Agent (${BUILD_NODE})..."
-              ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@17.87.2.139" "
-                ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP} '
-                  mkdir -p \\\$HOME/jenkins-agent
-                  curl -fsSL \"${JURL}/jnlpJars/agent.jar\" -o \\\$HOME/jenkins-agent/agent.jar
-                  nohup /usr/bin/java -jar \\\$HOME/jenkins-agent/agent.jar \\
-                    -url \"${JURL}\" \\
-                    -name \"${BUILD_NODE}\" \\
-                    -secret \"${SECRET}\" \\
-                    -workDir \\\$HOME/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &
-                  sleep 1
-                  echo \"AGENT_LAUNCHED\"
-                '
-              "
-            """
-          }
+      
      //下面的内容是排查 Pod 异常   
      //     sh '''
      //       kubectl -n ci wait --for=condition=Initialized --timeout=120s pod/macos-build-${BUILD_NODE} || true
