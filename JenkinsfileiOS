@@ -174,13 +174,12 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
           '''
         }
 
-        // ================= 使用 137ssh 密钥，通过宿主机跳板连接虚拟机 =================
+                // ================= 使用 137ssh 密钥，通过宿主机跳板连接虚拟机 =================
         withCredentials([sshUserPrivateKey(credentialsId: '137ssh', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
-          // 同样使用单引号 '''，彻底隔离 Groovy 解析器
           sh '''#!/bin/bash
             set -euo pipefail
             
-            # 在纯 Bash 环境下读取文件变量，再也不用担心 Groovy 报错
+            # 在纯 Bash 环境下读取文件变量
             VM_IP=$(cat .vm_ip.txt | tr -d ' \n\r')
             HOST_IP=$(cat .host_ip.txt | tr -d ' \n\r')
             SECRET=$(cat .jnlp.secret | tr -d ' \n\r')
@@ -208,47 +207,41 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
               exit 1
             fi
 
-            echo "[START] 生成跳板机 Python 登录脚本..."
+            echo "[START] 生成 macOS 原生 expect 登录脚本..."
             
-            cat > launcher.py << 'EOF'
-import pexpect, sys
-print("[1] Login into VM...")
-child = pexpect.spawn("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@__VM_IP__", timeout=30)
-idx = child.expect(["Password:", "password:", pexpect.EOF, pexpect.TIMEOUT])
-if idx in [0, 1]:
-    child.sendline("test")
-    child.expect(["% ", "$ ", "# "])
-    
-    print("[2] Downloading agent.jar...")
-    child.sendline("mkdir -p ~/jenkins-agent && curl -fSL '__JURL__/jnlpJars/agent.jar' -o ~/jenkins-agent/agent.jar")
-    child.expect(["% ", "$ ", "# "])
-    
-    print("[3] Starting Agent...")
-    child.sendline("nohup /opt/homebrew/opt/openjdk/bin/java -jar ~/jenkins-agent/agent.jar -url '__JURL__' -name '__NODE__' -secret '__SECRET__' -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &")
-    child.expect(["% ", "$ ", "# "])
-    
-    child.sendline("exit")
-    child.expect(pexpect.EOF)
-    print("[DONE] Agent successfully launched in VM!")
-else:
-    print("[ERR] SSH Login failed")
-    sys.exit(1)
+            # 使用 macOS 自带的 expect，免去安装任何 Python 依赖
+            cat > launcher.exp << 'EOF'
+set timeout 30
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@__VM_IP__
+expect {
+    "assword:" { send "test\r" }
+    "yes/no" { send "yes\r"; exp_continue }
+    timeout { puts "SSH Login Timeout"; exit 1 }
+}
+expect -re {[%$#] }
+send "mkdir -p ~/jenkins-agent && curl -fsSL '__JURL__/jnlpJars/agent.jar' -o ~/jenkins-agent/agent.jar\r"
+expect -re {[%$#] }
+send "nohup /opt/homebrew/opt/openjdk/bin/java -jar ~/jenkins-agent/agent.jar -url '__JURL__' -name '__NODE__' -secret '__SECRET__' -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 < /dev/null &\r"
+expect -re {[%$#] }
+send "exit\r"
+expect eof
 EOF
             
-            # 使用 sed 填充真实变量
+            # 填充真实变量
             sed -e "s|__VM_IP__|$VM_IP|g" \
                 -e "s|__JURL__|$JURL|g" \
                 -e "s|__NODE__|$NODE_NAME|g" \
                 -e "s|__SECRET__|$SECRET|g" \
-                launcher.py > final_launcher.py
+                launcher.exp > final_launcher.exp
 
-            echo "[EXEC] 通过宿主机执行 Python 脚本拉起 Agent..."
+            echo "[EXEC] 通过宿主机原生 expect 脚本拉起 Agent..."
             
-            $SSH_NODE python3 < final_launcher.py
+            $SSH_NODE /usr/bin/expect < final_launcher.exp
 
             echo "[SUCCESS] 节点 $NODE_NAME 启动指令已成功完成跳板注入！"
           '''
         }
+        
       }
     }
 
