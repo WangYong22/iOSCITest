@@ -171,7 +171,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
           """
         }
 
-        // ====== Jenkins 亲自连进虚拟机拉起 Agent，所有日志实时上报 ======
+               // ====== Jenkins 亲自连进虚拟机拉起 Agent，带进度条和防超时 ======
         script {
           def VM_IP = readFile('.vm_ip.txt').trim()
           def SECRET = readFile('.jnlp.secret').trim()
@@ -181,26 +181,39 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
             set -euo pipefail
 
             echo "=========================================="
-            echo "[WAIT] 测试虚拟机 SSH 端口连通性 (${VM_IP}:22)..."
-            for i in \$(seq 1 30); do
+            echo "[WAIT] 正在等待 macOS 虚拟机开机并启动 SSH 服务 (${VM_IP}:22)..."
+            echo "提示: macOS 虚拟机冷启动通常需要 1 到 3 分钟，请耐心等待。"
+            
+            SSH_READY=0
+            for i in \$(seq 1 60); do
               if nc -z -w 1 "${VM_IP}" 22 2>/dev/null; then
-                echo "[INFO] SSH 端口开放！"
+                SSH_READY=1
+                echo ""
+                echo "[INFO] SSH 端口已开放！开机完成。"
                 break
               fi
+              # 打印小圆点代表正在等待
+              printf "."
               sleep 3
             done
+
+            if [ "\$SSH_READY" -eq 0 ]; then
+              echo ""
+              echo "[ERR] 等待超过 3 分钟，虚拟机 SSH 仍未启动，判定为失败！"
+              exit 1
+            fi
 
             echo "=========================================="
             echo "[START] 通过 SSH 登录虚拟机并启动 Jenkins Agent..."
             
-            # 开启 set -x 打印每一行远端执行的命令
-            sshpass -p 'test' ssh -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP} << 'REMOTE'
+            # 加入 ConnectTimeout=10，防止意外挂起
+            sshpass -p 'test' ssh -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 test@${VM_IP} << 'REMOTE'
               set -ex
               
               echo "1. 创建工作目录"
               mkdir -p ~/jenkins-agent
               
-              echo "2. 下载 Jenkins Agent.jar (显示详细进度)"
+              echo "2. 下载 Jenkins Agent.jar"
               curl -fSL -v "${JURL}/jnlpJars/agent.jar" -o ~/jenkins-agent/agent.jar
               
               echo "3. 定位 Java 路径"
