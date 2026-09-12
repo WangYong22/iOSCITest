@@ -137,8 +137,6 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
       }
     }
 
-
-
     stage('Launch VM Pod') {
       agent { label 'macmain' }   // <- 这里是装了 kubectl 的 Mac节点
       steps {
@@ -150,150 +148,52 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
                 -e "s/__VZ_USER__/test/g" \
                 -e "s/__VZ_PASS__/test/g" macos-pod.yaml > rendered.yaml
 
+            echo '===== rendered.yaml (compute env) ====='
+            awk '/name: compute/{f=1} f{print} /name: jenkins-bootstrap/{f=0}' rendered.yaml
+            echo '======================================'
+
             kubectl -n ci apply -f rendered.yaml
-
-            # 1. 动态获取本次 Pod 所在的宿主机 IP 和 VM 内部 IP（完全自适应任何 Mac 节点）
-            echo "[WAIT] 等待 Pod 分配宿主机与动态 IP..."
-            VM_IP=""
-            HOST_IP=""
-            for i in \$(seq 1 30); do
-              VM_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.podIP}' 2>/dev/null || true)
-              HOST_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.hostIP}' 2>/dev/null || true)
-              if [ -n "\$VM_IP" ] && [ -n "\$HOST_IP" ]; then
-                echo "[INFO] 调度成功! 宿主机 Node IP: \$HOST_IP, 虚拟机 VM IP: \$VM_IP"
-                break
-              fi
-              sleep 2
-            done
-            [ -n "\$VM_IP" ] || { echo "[ERR] 获取 VM IP 超时"; exit 1; }
-            [ -n "\$HOST_IP" ] || { echo "[ERR] 获取宿主机 IP 超时"; exit 1; }
-
-            echo "\$VM_IP"   > .vm_ip.txt
-            echo "\$HOST_IP" > .host_ip.txt
           """
-        }
+      
+     //下面的内容是排查 Pod 异常   
+     //     sh '''
+     //       kubectl -n ci wait --for=condition=Initialized --timeout=120s pod/macos-build-${BUILD_NODE} || true
 
-        // 2. 动态登录对应的 Mac 宿主机，拉起对应 VM 里的 Agent
-        withCredentials([sshUserPrivateKey(credentialsId: '137ssh',
-                                           keyFileVariable: 'SSH_KEY',
-                                           usernameVariable: 'SSH_USER')]) {
-          script {
-            def VM_IP   = readFile('.vm_ip.txt').trim()
-            def HOST_IP = readFile('.host_ip.txt').trim()
-            def SECRET  = readFile('.jnlp.secret').trim()
-            def JURL    = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
+     //       kubectl -n ci describe pod macos-build-${BUILD_NODE} | sed -n '/Events:/,$p'
+     //       kubectl -n ci get pod macos-build-${BUILD_NODE} -o wide || true
 
-            // 生成纯 shell 启动脚本
-            sh '''#!/bin/bash
-cat > .launch_agent.sh << 'EOF'
-#!/bin/bash
-set -euo pipefail
+     //      kubectl -n ci get pod macos-build-${BUILD_NODE} -o json \
+     //        | jq '.spec.containers[] | select(.name=="jenkins-bootstrap") | {envFrom: .envFrom, env: .env}' || true
 
-TARGET_VM="$1"
-JENKINS_BASE_URL="$2"
-AGENT_NAME="$3"
-AGENT_SECRET="$4"
+     //       kubectl -n ci get secret jenkins-macos-${BUILD_NODE} -o jsonpath='{.data.JENKINS_URL}' | base64 -d; echo
+     //       kubectl -n ci get secret jenkins-macos-${BUILD_NODE} -o jsonpath='{.data.JENKINS_SECRET}' | base64 -d | awk '{print "LEN=" length}'
 
-echo "[WAIT] 等待虚拟机 SSH 就绪 (${TARGET_VM}:22)..."
-for i in $(seq 1 45); do
-  if nc -z -w 1 "${TARGET_VM}" 22 2>/dev/null; then
-    echo "[INFO] 虚拟机 SSH 已经就绪！"
-    break
-  fi
-  sleep 2
-done
+        
+     //     '''
+     //     sh '''
+     //       POD=macos-build-${BUILD_NODE}
 
-echo "[START] 启动 Jenkins Agent (${AGENT_NAME})..."
+     //         # 每个容器的等待原因/信息
+     //       kubectl -n ci get pod "$POD" -o jsonpath='{range .status.containerStatuses[*]}{.name}{" => "}{.state.waiting.reason}{" : "}{.state.waiting.message}{"\n"}{end}' || true
+     //       echo
 
-# 准备在虚拟机内运行的纯 Shell 脚本
-cat > /tmp/.vm_start.sh << VMSH
-mkdir -p \$HOME/jenkins-agent
-curl -fsSL "${JENKINS_BASE_URL}/jnlpJars/agent.jar" -o \$HOME/jenkins-agent/agent.jar
-nohup /usr/bin/java -jar \$HOME/jenkins-agent/agent.jar \\
-  -url "${JENKINS_BASE_URL}" \\
-  -name "${AGENT_NAME}" \\
-  -secret "${AGENT_SECRET}" \\
-  -workDir \$HOME/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &
-sleep 2
-echo "AGENT_STARTED_SUCCESSFULLY"
-VMSH
+     //          # 只看 jenkins-bootstrap 的详细等待对象
+     //       kubectl -n ci get pod "$POD" -o json \
+     //          | jq '.status.containerStatuses[] | select(.name=="jenkins-bootstrap")' || true
 
-# 用 Python PTY 仅作为密码输入网关，把 /tmp/.vm_start.sh 喂进 VM
-python3 - "$TARGET_VM" << 'PYEOF'
-import os, sys, time, pty, select
-
-target_vm = sys.argv[1]
-with open("/tmp/.vm_start.sh", "rb") as f:
-    vm_script = f.read()
-
-master, slave = pty.openpty()
-pid = os.fork()
-
-if pid == 0:
-    os.close(master)
-    os.setsid()
-    os.dup2(slave, 0)
-    os.dup2(slave, 1)
-    os.dup2(slave, 2)
-    os.close(slave)
-    os.execlp("ssh", "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", f"test@{target_vm}", "bash -s")
-else:
-    os.close(slave)
-    output = b""
-    pass_sent = False
-    start_time = time.time()
-
-    while time.time() - start_time < 30:
-        r, _, _ = select.select([master], [], [], 1)
-        if r:
-            try:
-                chunk = os.read(master, 1024)
-                if not chunk:
-                    break
-                output += chunk
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
-
-                if not pass_sent and (b"Password:" in output or b"password:" in output):
-                    time.sleep(0.5)
-                    os.write(master, b"test\n")
-                    pass_sent = True
-                    time.sleep(1)
-                    # 密码通过后直接注入完整脚本并关闭输入
-                    os.write(master, vm_script + b"\nexit 0\n")
-            except OSError:
-                break
-
-    os.close(master)
-    os.waitpid(pid, 0)
-PYEOF
-
-rm -f /tmp/.vm_start.sh
-echo "[DONE] Agent 启动指令下发完成！"
-EOF
-'''
-
-            withEnv(["TARGET_HOST=${HOST_IP}", "T_VM=${VM_IP}", "T_URL=${JURL}", "T_NAME=${BUILD_NODE}", "T_SECRET=${SECRET}"]) {
-              sh '''#!/bin/bash
-                set -euo pipefail
-                
-                SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
-                  
-                echo "[SCP] 上传启动脚本到 ${TARGET_HOST}..."
-                scp "${SSH_OPTS[@]}" .launch_agent.sh "$SSH_USER@${TARGET_HOST}:/tmp/.launch_agent.sh"
-                
-                echo "[EXEC] 在 ${TARGET_HOST} 上执行启动脚本..."
-                ssh "${SSH_OPTS[@]}" "$SSH_USER@${TARGET_HOST}" "bash /tmp/.launch_agent.sh '$T_VM' '$T_URL' '$T_NAME' '$T_SECRET' && rm -f /tmp/.launch_agent.sh"
-                
-                echo "[DONE] 节点启动指令执行完毕！"
-              '''
-            }
-          }
+     //          # 相关事件（按时间排序）
+     //        kubectl -n ci get events --field-selector involvedObject.name="$POD" --sort-by=.lastTimestamp || true
+     //      '''
+     //      sh '''
+     //        kubectl -n ci get pod macos-build-${BUILD_NODE} -o yaml \
+     //          | sed -n "/containerStatuses:/,/^$/p" || true
+     //      '''
+     //      sh """
+     //        kubectl -n ci get pod macos-build-${BUILD_NODE} -o wide || true
+     //      """
         }
       }
     }
-  
-  
   
 	stage('Cred debug: ssh private key (137ssh)') {
 	  agent { label 'macmain' }   // <- 这里是装了 kubectl 的 Mac节点
