@@ -223,11 +223,9 @@ PYEOF
               sh '''#!/bin/bash
                 set -euo pipefail
                 
-                # 检查密钥文件是否存在
-                [ -f "$SSH_KEY" ] || { echo "[ERR] SSH_KEY 文件不存在: $SSH_KEY"; exit 1; }
-
+                # 使用打通的137上原生 ed25519 私钥
                 SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
-                
+                  
                 echo "[SCP] 上传启动脚本到 ${TARGET_HOST}..."
                 scp "${SSH_OPTS[@]}" .launch_agent.sh "$SSH_USER@${TARGET_HOST}:/tmp/.launch_agent.sh"
                 
