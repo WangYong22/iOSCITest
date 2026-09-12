@@ -185,14 +185,13 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
               set -euo pipefail
               
               echo "=========================================="
-              echo "[JUMP] Jenkins 准备通过宿主机 (\$HOST_IP) 跳板连接虚拟机 (\$VM_IP)..."
-              SSH_NODE="ssh -i '\$SSH_KEY' -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '\$SSH_USER@\${HOST_IP}'"
+              echo "[JUMP] Jenkins 准备通过宿主机 (${HOST_IP}) 跳板连接虚拟机 (${VM_IP})..."
+              SSH_NODE="ssh -i '\$SSH_KEY' -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '\$SSH_USER@${HOST_IP}'"
 
-              echo "[WAIT] 从宿主机探测虚拟机 SSH 端口 (\${VM_IP}:22)..."
+              echo "[WAIT] 从宿主机探测虚拟机 SSH 端口 (${VM_IP}:22)..."
               SSH_READY=0
               for i in \$(seq 1 45); do
-                # 关键：这句探测命令是在 HOST_IP 身上执行的，绕过了网络隔离
-                if \$SSH_NODE "nc -z -w 1 \${VM_IP} 22" 2>/dev/null; then
+                if \$SSH_NODE "nc -z -w 1 ${VM_IP} 22" 2>/dev/null; then
                   SSH_READY=1
                   echo "[INFO] SSH 端口已开放！虚拟机启动完成。"
                   break
@@ -205,34 +204,46 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
                 exit 1
               fi
 
-              echo "[START] 通过宿主机注入 Python 脚本，登录虚拟机启动 Agent..."
+              echo "[START] 生成跳板机 Python 登录脚本..."
               
-              # 恢复你原来的 pexpect 脚本，但使用了最正确的 Java 路径
-              \$SSH_NODE 'python3 -c "
+              # 1. 用纯文本写入 Python 脚本，彻底避开 Groovy 的引号转义地狱
+              cat > launcher.py << 'EOF'
 import pexpect, sys
-print(\\"[1] Login into VM...\\")
-child = pexpect.spawn(\\"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@'${VM_IP}'\\", timeout=30)
-idx = child.expect([\\"Password:\\", \\"password:\\", pexpect.EOF, pexpect.TIMEOUT])
+print("[1] Login into VM...")
+child = pexpect.spawn("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@__VM_IP__", timeout=30)
+idx = child.expect(["Password:", "password:", pexpect.EOF, pexpect.TIMEOUT])
 if idx in [0, 1]:
-    child.sendline(\\"test\\")
-    child.expect([\\"% \\", \\"$ \\", \\"# \\"])
+    child.sendline("test")
+    child.expect(["% ", "$ ", "# "])
     
-    print(\\"[2] Downloading agent.jar...\\")
-    child.sendline(\\"mkdir -p ~/jenkins-agent && curl -fSL '${JURL}/jnlpJars/agent.jar' -o ~/jenkins-agent/agent.jar\\")
-    child.expect([\\"% \\", \\"$ \\", \\"# \\"])
+    print("[2] Downloading agent.jar...")
+    child.sendline("mkdir -p ~/jenkins-agent && curl -fSL '__JURL__/jnlpJars/agent.jar' -o ~/jenkins-agent/agent.jar")
+    child.expect(["% ", "$ ", "# "])
     
-    print(\\"[3] Starting Agent...\\")
-    # 核心修复点：这里使用了你虚拟机真实的 java 路径
-    child.sendline(\\"nohup /opt/homebrew/opt/openjdk/bin/java -jar ~/jenkins-agent/agent.jar -url '${JURL}' -name '${BUILD_NODE}' -secret '${SECRET}' -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &\\")
-    child.expect([\\"% \\", \\"$ \\", \\"# \\"])
+    print("[3] Starting Agent...")
+    child.sendline("nohup /opt/homebrew/opt/openjdk/bin/java -jar ~/jenkins-agent/agent.jar -url '__JURL__' -name '__NODE__' -secret '__SECRET__' -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &")
+    child.expect(["% ", "$ ", "# "])
     
-    child.sendline(\\"exit\\")
+    child.sendline("exit")
     child.expect(pexpect.EOF)
-    print(\\"[DONE] Agent successfully launched in VM!\\")
+    print("[DONE] Agent successfully launched in VM!")
 else:
-    print(\\"[ERR] SSH Login failed\\")
+    print("[ERR] SSH Login failed")
     sys.exit(1)
-"'
+EOF
+
+              # 2. 安全地替换变量，生成最终执行脚本
+              sed -e "s|__VM_IP__|${VM_IP}|g" \\
+                  -e "s|__JURL__|${JURL}|g" \\
+                  -e "s|__NODE__|${BUILD_NODE}|g" \\
+                  -e "s|__SECRET__|${SECRET}|g" \\
+                  launcher.py > final_launcher.py
+
+              echo "[EXEC] 通过宿主机执行 Python 脚本拉起 Agent..."
+              
+              # 3. 直接把脚本当作输入喂给宿主机的 python3
+              \$SSH_NODE python3 < final_launcher.py
+
               echo "[SUCCESS] 节点 ${BUILD_NODE} 启动指令已成功完成跳板注入！"
             """
           }
