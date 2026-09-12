@@ -135,9 +135,10 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
           }
         }
       }
-    }
-
-        stage('Launch VM Pod') {
+    }    
+    
+    
+    stage('Launch VM Pod') {
       agent { label 'macmain' }   
       steps {
         sh 'cp /Users/mdsadmin/jenkins_home/pod-templates/macos-pod.yaml .'
@@ -151,10 +152,8 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
                 -e "s/__VZ_USER__/test/g" \
                 -e "s/__VZ_PASS__/test/g" macos-pod.yaml > rendered.yaml
 
-            # 动态剔除黑盒 jenkins-bootstrap 容器，只启动 macOS 虚拟机
-            awk '/name: compute/{f=1} f{print} /name: jenkins-bootstrap/{f=0}' rendered.yaml > final_pod.yaml
-
-            kubectl -n ci apply -f final_pod.yaml
+            # 直接应用替换好的 YAML
+            kubectl -n ci apply -f rendered.yaml
 
             echo "=========================================="
             echo "[WAIT] 等待 K8s 分配虚拟机 IP..."
@@ -172,7 +171,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
           """
         }
 
-        // ====== 关键改动：由 Jenkins 亲自连进虚拟机拉起 Agent，所有日志实时上报 ======
+        // ====== Jenkins 亲自连进虚拟机拉起 Agent，所有日志实时上报 ======
         script {
           def VM_IP = readFile('.vm_ip.txt').trim()
           def SECRET = readFile('.jnlp.secret').trim()
@@ -224,11 +223,13 @@ SH
               echo "Agent 启动指令发送完毕！"
 REMOTE
 
-            echo "[DONE] 恭喜！节点 ${BUILD_NODE} 已启动！"
+            echo "[DONE] 恭喜！节点 ${BUILD_NODE} 启动指令注入完成！"
           """
         }
       }
     }
+
+    stage('
     
     
   
