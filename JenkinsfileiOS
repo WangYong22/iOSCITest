@@ -137,63 +137,100 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
       }
     }
 
-    stage('Launch VM Pod') {
-      agent { label 'macmain' }   // <- 这里是装了 kubectl 的 Mac节点
+        stage('Launch VM Pod') {
+      agent { label 'macmain' }   
       steps {
         sh 'cp /Users/mdsadmin/jenkins_home/pod-templates/macos-pod.yaml .'
+        
         withKubeConfig([credentialsId: env.KCFG_ID]) {
-          sh """
+          sh """#!/bin/bash
+            set -euo pipefail
+            
             sed -e "s/__BUILD_ID__/${BUILD_NODE}/g" \
                 -e "s/__HOST_PORT__/30222/g"  \
                 -e "s/__VZ_USER__/test/g" \
                 -e "s/__VZ_PASS__/test/g" macos-pod.yaml > rendered.yaml
 
-            echo '===== rendered.yaml (compute env) ====='
-            awk '/name: compute/{f=1} f{print} /name: jenkins-bootstrap/{f=0}' rendered.yaml
-            echo '======================================'
+            # 动态剔除黑盒 jenkins-bootstrap 容器，只启动 macOS 虚拟机
+            awk '/name: compute/{f=1} f{print} /name: jenkins-bootstrap/{f=0}' rendered.yaml > final_pod.yaml
 
-            kubectl -n ci apply -f rendered.yaml
+            kubectl -n ci apply -f final_pod.yaml
+
+            echo "=========================================="
+            echo "[WAIT] 等待 K8s 分配虚拟机 IP..."
+            VM_IP=""
+            for i in \$(seq 1 30); do
+              VM_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+              if [ -n "\$VM_IP" ]; then
+                echo "[INFO] 虚拟机 IP 获取成功: \$VM_IP"
+                break
+              fi
+              sleep 2
+            done
+            [ -n "\$VM_IP" ] || { echo "[ERR] 获取 VM IP 超时"; exit 1; }
+            echo "\$VM_IP" > .vm_ip.txt
           """
-      
-     //下面的内容是排查 Pod 异常   
-     //     sh '''
-     //       kubectl -n ci wait --for=condition=Initialized --timeout=120s pod/macos-build-${BUILD_NODE} || true
+        }
 
-     //       kubectl -n ci describe pod macos-build-${BUILD_NODE} | sed -n '/Events:/,$p'
-     //       kubectl -n ci get pod macos-build-${BUILD_NODE} -o wide || true
+        // ====== 关键改动：由 Jenkins 亲自连进虚拟机拉起 Agent，所有日志实时上报 ======
+        script {
+          def VM_IP = readFile('.vm_ip.txt').trim()
+          def SECRET = readFile('.jnlp.secret').trim()
+          def JURL = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
 
-     //      kubectl -n ci get pod macos-build-${BUILD_NODE} -o json \
-     //        | jq '.spec.containers[] | select(.name=="jenkins-bootstrap") | {envFrom: .envFrom, env: .env}' || true
+          sh """#!/bin/bash
+            set -euo pipefail
 
-     //       kubectl -n ci get secret jenkins-macos-${BUILD_NODE} -o jsonpath='{.data.JENKINS_URL}' | base64 -d; echo
-     //       kubectl -n ci get secret jenkins-macos-${BUILD_NODE} -o jsonpath='{.data.JENKINS_SECRET}' | base64 -d | awk '{print "LEN=" length}'
+            echo "=========================================="
+            echo "[WAIT] 测试虚拟机 SSH 端口连通性 (${VM_IP}:22)..."
+            for i in \$(seq 1 30); do
+              if nc -z -w 1 "${VM_IP}" 22 2>/dev/null; then
+                echo "[INFO] SSH 端口开放！"
+                break
+              fi
+              sleep 3
+            done
 
-        
-     //     '''
-     //     sh '''
-     //       POD=macos-build-${BUILD_NODE}
+            echo "=========================================="
+            echo "[START] 通过 SSH 登录虚拟机并启动 Jenkins Agent..."
+            
+            # 开启 set -x 打印每一行远端执行的命令
+            sshpass -p 'test' ssh -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP} << 'REMOTE'
+              set -ex
+              
+              echo "1. 创建工作目录"
+              mkdir -p ~/jenkins-agent
+              
+              echo "2. 下载 Jenkins Agent.jar (显示详细进度)"
+              curl -fSL -v "${JURL}/jnlpJars/agent.jar" -o ~/jenkins-agent/agent.jar
+              
+              echo "3. 定位 Java 路径"
+              JAVA_PATH=\$(which java || echo "/opt/homebrew/opt/openjdk/bin/java")
+              echo "使用 Java 路径: \$JAVA_PATH"
+              \$JAVA_PATH -version
+              
+              echo "4. 生成启动脚本"
+              cat > ~/jenkins-agent/run.sh << 'SH'
+#!/bin/zsh
+exec \$JAVA_PATH -jar "\$HOME/jenkins-agent/agent.jar" \\
+  -url "${JURL}" -name "${BUILD_NODE}" -secret "${SECRET}" \\
+  -workDir "\$HOME/jenkins-agent" -webSocket
+SH
+              chmod +x ~/jenkins-agent/run.sh
+              
+              echo "5. 后台启动 Agent"
+              nohup ~/jenkins-agent/run.sh > /tmp/agent.out 2>&1 &
+              
+              echo "Agent 启动指令发送完毕！"
+REMOTE
 
-     //         # 每个容器的等待原因/信息
-     //       kubectl -n ci get pod "$POD" -o jsonpath='{range .status.containerStatuses[*]}{.name}{" => "}{.state.waiting.reason}{" : "}{.state.waiting.message}{"\n"}{end}' || true
-     //       echo
-
-     //          # 只看 jenkins-bootstrap 的详细等待对象
-     //       kubectl -n ci get pod "$POD" -o json \
-     //          | jq '.status.containerStatuses[] | select(.name=="jenkins-bootstrap")' || true
-
-     //          # 相关事件（按时间排序）
-     //        kubectl -n ci get events --field-selector involvedObject.name="$POD" --sort-by=.lastTimestamp || true
-     //      '''
-     //      sh '''
-     //        kubectl -n ci get pod macos-build-${BUILD_NODE} -o yaml \
-     //          | sed -n "/containerStatuses:/,/^$/p" || true
-     //      '''
-     //      sh """
-     //        kubectl -n ci get pod macos-build-${BUILD_NODE} -o wide || true
-     //      """
+            echo "[DONE] 恭喜！节点 ${BUILD_NODE} 已启动！"
+          """
         }
       }
     }
+    
+    
   
 	stage('Cred debug: ssh private key (137ssh)') {
 	  agent { label 'macmain' }   // <- 这里是装了 kubectl 的 Mac节点
