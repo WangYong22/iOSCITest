@@ -139,7 +139,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
 
 
 
-    stage('Launch VM Pod') {
+        stage('Launch VM Pod') {
       agent { label 'macmain' }   // <- 这里是装了 kubectl 的 Mac节点
       steps {
         sh 'cp /Users/mdsadmin/jenkins_home/pod-templates/macos-pod.yaml .'
@@ -183,7 +183,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
             def SECRET  = readFile('.jnlp.secret').trim()
             def JURL    = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
 
-            // 生成纯 shell 启动脚本（单引号包裹，Groovy 绝不插值解析）
+            // 生成纯 shell 启动脚本
             sh '''#!/bin/bash
 cat > .launch_agent.sh << 'EOF'
 #!/bin/bash
@@ -205,7 +205,6 @@ done
 
 echo "[START] 启动 Jenkins Agent (${AGENT_NAME})..."
 
-# 使用 macOS 自带 Python 的 pty 库精准输入密码和命令（零外部依赖，绝不丢失字符）
 python3 - "$TARGET_VM" "$JENKINS_BASE_URL" "$AGENT_NAME" "$AGENT_SECRET" << 'PYEOF'
 import os, sys, time, pty, select
 
@@ -214,7 +213,8 @@ jurl      = sys.argv[2]
 name      = sys.argv[3]
 secret    = sys.argv[4]
 
-cmd = f"mkdir -p ~/jenkins-agent && curl -fsSL {jurl}/jnlpJars/agent.jar -o ~/jenkins-agent/agent.jar && nohup /usr/bin/java -jar ~/jenkins-agent/agent.jar -url {jurl} -name {name} -secret {secret} -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &\n"
+# 用字符串拼接避免 \\n 转义被吃掉
+cmd = "mkdir -p ~/jenkins-agent && curl -fsSL " + jurl + "/jnlpJars/agent.jar -o ~/jenkins-agent/agent.jar && nohup /usr/bin/java -jar ~/jenkins-agent/agent.jar -url " + jurl + " -name " + name + " -secret " + secret + " -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &\r\n"
 
 master, slave = pty.openpty()
 pid = os.fork()
@@ -226,7 +226,7 @@ if pid == 0:
     os.dup2(slave, 1)
     os.dup2(slave, 2)
     os.close(slave)
-    os.execlp("ssh", "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", f"test@{target_vm}")
+    os.execlp("ssh", "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "test@" + target_vm)
 else:
     os.close(slave)
     output = b""
@@ -248,17 +248,17 @@ else:
                 # 检测密码提示
                 if not pass_sent and (b"Password:" in output or b"password:" in output):
                     time.sleep(0.5)
-                    os.write(master, b"test\n")
+                    os.write(master, b"test\r\n")
                     pass_sent = True
                     output = b""
 
                 # 密码通过进入终端后发送启动命令
                 elif pass_sent and not cmd_sent and (b"%" in output or b"$" in output or b"#" in output or b">" in output):
                     time.sleep(1)
-                    os.write(master, cmd.encode())
+                    os.write(master, cmd.encode("utf-8"))
                     cmd_sent = True
                     time.sleep(3)
-                    os.write(master, b"exit\n")
+                    os.write(master, b"exit\r\n")
                     break
             except OSError:
                 break
