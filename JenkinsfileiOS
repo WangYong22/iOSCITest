@@ -895,7 +895,7 @@ PL
 		
 		WEB_HOST='45.77.155.247'
 		WEB_DIR='/var/www/ios/myapp'
-		WEB_BASE_URL='https://vvv.wy2wy.tk:4433/ios/myapp'
+		WEB_BASE_URL='https://vvv.wy2wy.tk:8443/ios/myapp'
 		BUNDLE_VERSION_FIXED='1.0'
 		
 		# 读取构建阶段导出的 export_path（用于找到本地 IPA 并上传）
