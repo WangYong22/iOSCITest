@@ -144,7 +144,8 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
         sh 'cp /Users/mdsadmin/jenkins_home/pod-templates/macos-pod.yaml .'
         
         withKubeConfig([credentialsId: env.KCFG_ID]) {
-          sh """#!/bin/bash
+          // 这里使用单引号 '''，Groovy 不再干涉任何 $ 符号
+          sh '''#!/bin/bash
             set -euo pipefail
             
             sed -e "s/__BUILD_ID__/${BUILD_NODE}/g" \
@@ -158,56 +159,58 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
             echo "[WAIT] 等待 K8s 分配虚拟机 IP 和宿主机 IP..."
             VM_IP=""
             HOST_IP=""
-            for i in \$(seq 1 30); do
-              VM_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.podIP}' 2>/dev/null || true)
-              HOST_IP=\$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.hostIP}' 2>/dev/null || true)
-              if [ -n "\$VM_IP" ] && [ -n "\$HOST_IP" ]; then
-                echo "[INFO] 成功获取 VM_IP: \$VM_IP, 宿主机 IP: \$HOST_IP"
+            for i in $(seq 1 30); do
+              VM_IP=$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+              HOST_IP=$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.hostIP}' 2>/dev/null || true)
+              if [ -n "$VM_IP" ] && [ -n "$HOST_IP" ]; then
+                echo "[INFO] 成功获取 VM_IP: $VM_IP, 宿主机 IP: $HOST_IP"
                 break
               fi
               sleep 2
             done
-            [ -n "\$VM_IP" ] || { echo "[ERR] 获取 VM/HOST IP 超时"; exit 1; }
-            echo "\$VM_IP" > .vm_ip.txt
-            echo "\$HOST_IP" > .host_ip.txt
-          """
+            [ -n "$VM_IP" ] || { echo "[ERR] 获取 VM/HOST IP 超时"; exit 1; }
+            echo "$VM_IP" > .vm_ip.txt
+            echo "$HOST_IP" > .host_ip.txt
+          '''
         }
 
         // ================= 使用 137ssh 密钥，通过宿主机跳板连接虚拟机 =================
         withCredentials([sshUserPrivateKey(credentialsId: '137ssh', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
-          script {
-            def VM_IP = readFile('.vm_ip.txt').trim()
-            def HOST_IP = readFile('.host_ip.txt').trim()
-            def SECRET = readFile('.jnlp.secret').trim()
-            def JURL = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
+          // 同样使用单引号 '''，彻底隔离 Groovy 解析器
+          sh '''#!/bin/bash
+            set -euo pipefail
+            
+            # 在纯 Bash 环境下读取文件变量，再也不用担心 Groovy 报错
+            VM_IP=$(cat .vm_ip.txt | tr -d ' \n\r')
+            HOST_IP=$(cat .host_ip.txt | tr -d ' \n\r')
+            SECRET=$(cat .jnlp.secret | tr -d ' \n\r')
+            JURL="${JENKINS_URL:-http://17.87.2.137:8080}"
+            NODE_NAME="${BUILD_NODE}"
+            
+            echo "=========================================="
+            echo "[JUMP] Jenkins 准备通过宿主机 ($HOST_IP) 跳板连接虚拟机 ($VM_IP)..."
+            
+            SSH_NODE="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_USER@$HOST_IP"
 
-            sh """#!/bin/bash
-              set -euo pipefail
-              
-              echo "=========================================="
-              echo "[JUMP] Jenkins 准备通过宿主机 (${HOST_IP}) 跳板连接虚拟机 (${VM_IP})..."
-              SSH_NODE="ssh -i '\$SSH_KEY' -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '\$SSH_USER@${HOST_IP}'"
-
-              echo "[WAIT] 从宿主机探测虚拟机 SSH 端口 (${VM_IP}:22)..."
-              SSH_READY=0
-              for i in \$(seq 1 45); do
-                if \$SSH_NODE "nc -z -w 1 ${VM_IP} 22" 2>/dev/null; then
-                  SSH_READY=1
-                  echo "[INFO] SSH 端口已开放！虚拟机启动完成。"
-                  break
-                fi
-                sleep 3
-              done
-
-              if [ "\$SSH_READY" -eq 0 ]; then
-                echo "[ERR] 等待虚拟机 SSH 超时！"
-                exit 1
+            echo "[WAIT] 从宿主机探测虚拟机 SSH 端口 (${VM_IP}:22)..."
+            SSH_READY=0
+            for i in $(seq 1 45); do
+              if $SSH_NODE "nc -z -w 1 $VM_IP 22" 2>/dev/null; then
+                SSH_READY=1
+                echo "[INFO] SSH 端口已开放！虚拟机启动完成。"
+                break
               fi
+              sleep 3
+            done
 
-              echo "[START] 生成跳板机 Python 登录脚本..."
-              
-              # 1. 用纯文本写入 Python 脚本，彻底避开 Groovy 的引号转义地狱
-              cat > launcher.py << 'EOF'
+            if [ "$SSH_READY" -eq 0 ]; then
+              echo "[ERR] 等待虚拟机 SSH 超时！"
+              exit 1
+            fi
+
+            echo "[START] 生成跳板机 Python 登录脚本..."
+            
+            cat > launcher.py << 'EOF'
 import pexpect, sys
 print("[1] Login into VM...")
 child = pexpect.spawn("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@__VM_IP__", timeout=30)
@@ -231,22 +234,20 @@ else:
     print("[ERR] SSH Login failed")
     sys.exit(1)
 EOF
+            
+            # 使用 sed 填充真实变量
+            sed -e "s|__VM_IP__|$VM_IP|g" \
+                -e "s|__JURL__|$JURL|g" \
+                -e "s|__NODE__|$NODE_NAME|g" \
+                -e "s|__SECRET__|$SECRET|g" \
+                launcher.py > final_launcher.py
 
-              # 2. 安全地替换变量，生成最终执行脚本
-              sed -e "s|__VM_IP__|${VM_IP}|g" \\
-                  -e "s|__JURL__|${JURL}|g" \\
-                  -e "s|__NODE__|${BUILD_NODE}|g" \\
-                  -e "s|__SECRET__|${SECRET}|g" \\
-                  launcher.py > final_launcher.py
+            echo "[EXEC] 通过宿主机执行 Python 脚本拉起 Agent..."
+            
+            $SSH_NODE python3 < final_launcher.py
 
-              echo "[EXEC] 通过宿主机执行 Python 脚本拉起 Agent..."
-              
-              # 3. 直接把脚本当作输入喂给宿主机的 python3
-              \$SSH_NODE python3 < final_launcher.py
-
-              echo "[SUCCESS] 节点 ${BUILD_NODE} 启动指令已成功完成跳板注入！"
-            """
-          }
+            echo "[SUCCESS] 节点 $NODE_NAME 启动指令已成功完成跳板注入！"
+          '''
         }
       }
     }
