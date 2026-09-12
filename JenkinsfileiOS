@@ -183,7 +183,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
             def SECRET  = readFile('.jnlp.secret').trim()
             def JURL    = (env.JENKINS_URL?.trim()) ?: 'http://17.87.2.137:8080'
 
-            // 生成一段在宿主机执行的启动脚本
+            // 生成宿主机执行脚本（注意：Groovy 里的每个 $ 如果不是插值必须写成 \$）
             writeFile file: '.launch_agent.sh', text: """#!/bin/bash
 set -euo pipefail
 
@@ -197,32 +197,30 @@ for i in \$(seq 1 45); do
 done
 
 echo "[START] 启动 Jenkins Agent (${BUILD_NODE})..."
-/usr/bin/expect << 'EXPEOF'
+/usr/bin/expect - << 'EXPEOF'
 set timeout 30
 spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@${VM_IP}
 expect {
     "Password:" { send "test\r" }
     "password:" { send "test\r" }
-    timeout { puts "SSH_TIMEOUT"; exit 1 }
-    eof { puts "SSH_EOF"; exit 1 }
+    timeout { exit 1 }
+    eof { exit 1 }
 }
-expect -re {[%$#] }
+expect -re ".*(>|%|#|\\$) *"
 send "mkdir -p ~/jenkins-agent && curl -fsSL ${JURL}/jnlpJars/agent.jar -o ~/jenkins-agent/agent.jar\r"
-expect -re {[%$#] }
+expect -re ".*(>|%|#|\\$) *"
 send "nohup /usr/bin/java -jar ~/jenkins-agent/agent.jar -url ${JURL} -name ${BUILD_NODE} -secret ${SECRET} -workDir ~/jenkins-agent -webSocket >/tmp/agent.out 2>&1 &\r"
-expect -re {[%$#] }
+expect -re ".*(>|%|#|\\$) *"
 send "exit\r"
 expect eof
-puts "AGENT_LAUNCHED_SUCCESSFULLY"
 EXPEOF
+echo "[DONE] Agent 启动指令下发完成！"
 """.stripIndent()
 
-            // ✅ 核心修复：把 HOST_IP 通过环境变量传给 shell，使用原生的 "$SSH_KEY" 和 "$SSH_USER"
             withEnv(["TARGET_HOST=${HOST_IP}"]) {
               sh '''#!/bin/bash
                 set -euo pipefail
                 
-                # 使用打通的137上原生 ed25519 私钥
                 SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
                   
                 echo "[SCP] 上传启动脚本到 ${TARGET_HOST}..."
