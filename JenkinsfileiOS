@@ -189,10 +189,10 @@ cat > .launch_agent.sh << 'EOF'
 #!/bin/bash
 set -euo pipefail
 
-TARGET_VM="$1"
-JENKINS_BASE_URL="$2"
-AGENT_NAME="$3"
-AGENT_SECRET="$4"
+export TARGET_VM="$1"
+export JENKINS_BASE_URL="$2"
+export AGENT_NAME="$3"
+export AGENT_SECRET="$4"
 
 echo "[WAIT] 等待虚拟机 SSH 就绪 (${TARGET_VM}:22)..."
 for i in $(seq 1 45); do
@@ -204,12 +204,12 @@ for i in $(seq 1 45); do
 done
 
 echo "[START] 启动 Jenkins Agent (${AGENT_NAME})..."
-/usr/bin/expect - "${TARGET_VM}" "${JENKINS_BASE_URL}" "${AGENT_NAME}" "${AGENT_SECRET}" << 'EXPEOF'
+/usr/bin/expect << 'EXPEOF'
 set timeout 30
-set vm [lindex $argv 0]
-set jurl [lindex $argv 1]
-set name [lindex $argv 2]
-set secret [lindex $argv 3]
+set vm $env(TARGET_VM)
+set jurl $env(JENKINS_BASE_URL)
+set name $env(AGENT_NAME)
+set secret $env(AGENT_SECRET)
 
 spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null test@$vm
 expect {
