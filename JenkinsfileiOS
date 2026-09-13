@@ -973,6 +973,7 @@ for ipa in ipas:
         print(f"[ERR] {ipa}: {e}")
 
 with open("index.html", "w", encoding="utf-8") as out:
+    # 1. 写入表头
     out.write("""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -993,17 +994,26 @@ with open("index.html", "w", encoding="utf-8") as out:
 </ol>
 <table><thead><tr><th>名称</th><th>Bundle ID</th><th>构建时间</th><th>安装</th></tr></thead><tbody>
 """)
+    
+    # 2. 循环写入每一行数据（使用格式化和安全的三引号）
     for app, bid, b_time, plist_name in rows:
         full = f"{WEB_BASE_URL}/{plist_name}"
         esc = urllib.parse.quote(full, safe="")
         link = f"itms-services://?action=download-manifest&url={esc}"
-        # 网页上的第三列（版本列）直接显示构建时间
-        out.write(f"<tr><td>{html.escape(app)}</td><td>{html.escape(bid)}</td>"
-                  f"<td>{html.escape(b_time)}</td>"
-                  f"<td><a class='btn' href='{link}'>安装</a></td></tr>\n")
-    out.write("</tbody></table>"
-              "<p style='color:#666;font-size:13px'>若点击无反应：确认使用 Safari、HTTPS 证书有效，且设备 UDID 已在 Ad Hoc 白名单中。</p>"
-              "</body></html>")
+        
+        row_html = f"""<tr>
+            <td>{html.escape(app)}</td>
+            <td>{html.escape(bid)}</td>
+            <td>{html.escape(b_time)}</td>
+            <td><a class='btn' href='{link}'>安装</a></td>
+        </tr>"""
+        out.write(row_html)
+        
+    # 3. 写入收尾代码
+    out.write("""</tbody></table>
+<p style='color:#666;font-size:13px'>若点击无反应：确认使用 Safari、HTTPS 证书有效，且设备 UDID 已在 Ad Hoc 白名单中。</p>
+</body></html>""")
+
 print("[REMOTE] index.html rebuilt")
 PY
 
