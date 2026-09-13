@@ -1000,7 +1000,7 @@ with open("index.html", "w", encoding="utf-8") as out:
         # 网页上的第三列（版本列）直接显示构建时间
         out.write(f"<tr><td>{html.escape(app)}</td><td>{html.escape(bid)}</td>"
                   f"<td>{html.escape(b_time)}</td>"
-                  f"<td><a class=\"btn\" href=\"{link}\">安装</a></td></tr>\n")
+                  f"<td><a class='btn' href='{link}'>安装</a></td></tr>\n")
     out.write("</tbody></table>"
               "<p style='color:#666;font-size:13px'>若点击无反应：确认使用 Safari、HTTPS 证书有效，且设备 UDID 已在 Ad Hoc 白名单中。</p>"
               "</body></html>")
