@@ -159,7 +159,7 @@ kubectl -n ci create secret generic jenkins-macos-${NODE} \\
             echo "[WAIT] 等待 K8s 分配虚拟机 IP 和宿主机 IP..."
             VM_IP=""
             HOST_IP=""
-            for i in $(seq 1 30); do
+            for i in $(seq 1 300); do
               VM_IP=$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.podIP}' 2>/dev/null || true)
               HOST_IP=$(kubectl -n ci get pod macos-build-${BUILD_NODE} -o jsonpath='{.status.hostIP}' 2>/dev/null || true)
               if [ -n "$VM_IP" ] && [ -n "$HOST_IP" ]; then
