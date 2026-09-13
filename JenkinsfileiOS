@@ -921,11 +921,13 @@ PL
 		set -euo pipefail
 		cd /var/www/ios/myapp
 		
+		
 		# 准备 Python 脚本到临时文件（注意：PY 顶格；代码也从第 1 列开始）
 cat >/tmp/_gen_ipa_index.py <<'PY'
 import os, glob, zipfile, plistlib, urllib.parse, html
+from datetime import datetime
 
-WEB_BASE_URL = "https://vvv.wy2wy.tk:4433/ios/myapp"
+WEB_BASE_URL = "https://vvv.wy2wy.tk:8443/ios/myapp"
 BUNDLE_VERSION_FIXED = "1.0"
 
 ipas = sorted(glob.glob("*.ipa"), key=os.path.getmtime, reverse=True)
@@ -941,9 +943,11 @@ for ipa in ipas:
             with z.open(appdir + "Info.plist") as f:
                 info = plistlib.load(f)
         bundle_id = info.get("CFBundleIdentifier", "-")
-        ver_short = info.get("CFBundleShortVersionString", "1.0")
-        ver_build = info.get("CFBundleVersion", "1")
         app_name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or "App"
+
+        # 获取该 IPA 文件的修改时间，格式化为 YYYY-MM-DD HH:MM:SS
+        mtime = os.path.getmtime(ipa)
+        build_time = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
 
         base = os.path.basename(ipa)
         plist_name = os.path.splitext(base)[0] + ".plist"
@@ -955,6 +959,7 @@ for ipa in ipas:
                     "assets": [{"kind": "software-package", "url": ipa_url}],
                     "metadata": {
                         "bundle-identifier": bundle_id,
+                        # plist 内部还是保留原始版本逻辑以符合苹果规范，但网页显示时间
                         "bundle-version": BUNDLE_VERSION_FIXED,
                         "kind": "software",
                         "title": app_name,
@@ -962,7 +967,7 @@ for ipa in ipas:
                 }]}
             , pf, fmt=plistlib.FMT_XML)
 
-        rows.append((app_name, bundle_id, ver_short, ver_build, plist_name))
+        rows.append((app_name, bundle_id, build_time, plist_name))
         print(f"[REMOTE] wrote {plist_name}")
     except Exception as e:
         print(f"[ERR] {ipa}: {e}")
@@ -986,20 +991,23 @@ with open("index.html", "w", encoding="utf-8") as out:
  <li>确保设备 UDID 已加入 Ad Hoc Profile。</li>
  <li>点击“安装”即可。</li>
 </ol>
-<table><thead><tr><th>名称</th><th>Bundle ID</th><th>版本</th><th>安装</th></tr></thead><tbody>
+<table><thead><tr><th>名称</th><th>Bundle ID</th><th>构建时间</th><th>安装</th></tr></thead><tbody>
 """)
-    for app, bid, vs, vb, plist_name in rows:
+    for app, bid, b_time, plist_name in rows:
         full = f"{WEB_BASE_URL}/{plist_name}"
         esc = urllib.parse.quote(full, safe="")
         link = f"itms-services://?action=download-manifest&url={esc}"
+        # 网页上的第三列（版本列）直接显示构建时间
         out.write(f"<tr><td>{html.escape(app)}</td><td>{html.escape(bid)}</td>"
-                  f"<td>{html.escape(vs)} ({html.escape(vb)})</td>"
-                  f"<td><a class=\\"btn\\" href=\\"{link}\\">安装</a></td></tr>\\n")
+                  f"<td>{html.escape(b_time)}</td>"
+                  f"<td><a class=\"btn\" href=\"{link}\">安装</a></td></tr>\n")
     out.write("</tbody></table>"
               "<p style='color:#666;font-size:13px'>若点击无反应：确认使用 Safari、HTTPS 证书有效，且设备 UDID 已在 Ad Hoc 白名单中。</p>"
               "</body></html>")
 print("[REMOTE] index.html rebuilt")
 PY
+
+
 
 		# 运行并清理
 		python3 /tmp/_gen_ipa_index.py
